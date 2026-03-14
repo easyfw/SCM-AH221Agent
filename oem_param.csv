@@ -1,14 +1,76 @@
 ItemID,VarName,DataType,IGroup,IOffset,Description
-1,cMaxPann,INT,0x4020,584,Max panel count
-2,cMaxPrg,INT,0x4020,588,Max program count
-3,cMaxAlm,INT,0x4020,590,Max alarm count
-4,cMaxWrn,INT,0x4020,592,Max warning count
-5,cMaxMsg,INT,0x4020,594,Max message count
-6,cMaxDataPrg,INT,0x4020,596,Max data program
-7,cMaxGapArray,INT,0x4020,598,Max gap array
-8,cMaxNRot,INT,0x4020,600,Max roll count
-9,cMaxGrp,INT,0x4020,602,Max group count
-10,cMaxData,INT,0x4020,604,Max data
-11,cMaxDataProg,INT,0x4020,606,Max data prog
-12,cMaxDataProgValue,INT,0x4020,608,Max data prog value
-13,cMaxStation,INT,0x4020,612,Max station count
+# ================================================================
+# SCM AH221 Edge Bander - ADS Agent OEM Parameter File
+# PLC: Beckhoff TwinCAT 2 / AH00000221.pro (v01_06_003_1025)
+# Generated: 2026-03-14
+# Phase 1 Core Monitoring (55 variables)
+# ================================================================
+#
+# --- Machine State (Struct_MachineStatus) ---
+1,MS_bWORK,BOOL,0x4040,7283,Working/production active
+2,MS_bREADY,BOOL,0x4040,7298,Ready for panels
+3,MS_bBlocco,BOOL,0x4040,7299,Machine blocked/locked
+4,MS_nG_StatoMacchina,INT,0x4040,7319,Machine state number (summary)
+5,MS_bZERO,BOOL,0x4040,7275,Zero/home state
+6,MS_bMANUALE,BOOL,0x4040,7276,Manual mode
+7,MS_bSTARTUP,BOOL,0x4040,7278,Startup phase
+8,MS_bSTARTDOWN,BOOL,0x4040,7281,Shutdown phase
+9,MS_bEMPTY_C,BOOL,0x4040,7288,Empty cycle
+10,MS_bStandBy,BOOL,0x4040,7289,Standby (energy saving)
+11,MS_bMachineInLine,BOOL,0x4040,7301,In-line mode
+12,MS_bReteEthercatOk,BOOL,0x4040,7308,EtherCAT network OK
+13,MS_bEmergOk,BOOL,0x4040,7312,Emergency stop not active
+14,MS_bAuxOK,BOOL,0x4040,7313,Auxiliary power OK
+15,MS_bMandriniOK,BOOL,0x4040,7314,Spindles OK
+16,MS_bCingoloOK,BOOL,0x4040,7315,Chain/track OK
+17,MS_bRipariOK,BOOL,0x4040,7316,Safety guards OK
+18,MS_bAriaOK,BOOL,0x4040,7317,Air pressure OK
+19,MS_bALM,BOOL,0x4040,7331,Alarm active
+20,MS_bALM_BLK,BOOL,0x4040,7332,Blocking alarm active
+21,MS_bWRN,BOOL,0x4040,7334,Warning active
+#
+# --- Chain Status ---
+22,CH_fActualSpeed,LREAL,0x4040,7349,Chain speed (mm/min)
+23,CH_bMoto,BOOL,0x4040,7338,Chain motor running
+24,CH_bReady,BOOL,0x4040,7337,Chain ready
+25,CH_bStandstill,BOOL,0x4040,7339,Chain standstill
+26,CH_bWorkProd,BOOL,0x4040,7341,Chain in production
+27,CH_bPowerOk,BOOL,0x4040,7346,Chain power OK
+28,CH_bAlm,BOOL,0x4040,7347,Chain alarm
+29,CH_bMoving,BOOL,0x4040,7373,Chain moving
+30,CH_bAtSpeed,BOOL,0x4040,7374,Chain at target speed
+#
+# --- Production Counters ---
+31,bAlm_main,BOOL,0x4040,7149,Main alarm active flag
+32,fCnt,LREAL,0x4040,7150,Panel counter (main)
+33,fCntIntrod,LREAL,0x4040,7158,Panel counter (introducer)
+34,nP_entry,INT,0x4040,1791322,Panel at entry
+35,nP_exit,INT,0x4040,1791324,Panel at exit
+36,nPTEntry,INT,0x4040,1791326,Panel type at entry
+37,nPCEntry,INT,0x4040,1791328,Panel count at entry
+38,nPCExit,INT,0x4040,1791330,Panel count at exit
+39,nCntMemoCmdFineLotto,INT,0x4040,23444,Batch end command counter
+#
+# --- Panel Sensors ---
+40,E_entrata_pannello_sx,BOOL,0x4040,7174,Panel entry sensor left
+41,E_passaggio_pannello_sx,BOOL,0x4040,7175,Panel pass sensor left
+42,E_passaggio_pannello_dx,BOOL,0x4040,7176,Panel pass sensor right
+43,E_Controllo_distanziamento_sx,BOOL,0x4040,7179,Distance check left
+44,E_Controllo_distanziamento_dx,BOOL,0x4040,7180,Distance check right
+#
+# --- Panel Dimensions ---
+45,fL_Introduttore,LREAL,0x4040,23775,Length at introducer (mm)
+46,fW_Introduttore,LREAL,0x4040,23783,Width at introducer (mm)
+47,fL_Machine,LREAL,0x4040,23791,Length at machine (mm)
+48,fW_Machine,LREAL,0x4040,23799,Width at machine (mm)
+49,fL_FtcGlobale,LREAL,0x4040,23807,Global FTC length (mm)
+50,fL_FtcLocale,LREAL,0x4040,23815,Local FTC length (mm)
+#
+# --- Program Management ---
+51,nIndexPrgActiveEntry,INT,0x4040,28268,Active program index
+52,fdCodaLastPann,LREAL,0x4040,23436,Last panel queue position
+#
+# --- System ---
+53,CycleTimeApp_ms,UDINT,0x4040,23728,App cycle time (ms)
+54,bRebootActive,BOOL,0x4040,23740,Reboot in progress
+55,uiTimeMs,UINT,0x4040,7141,System time (ms)
