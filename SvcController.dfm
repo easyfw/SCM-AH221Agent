@@ -1,8 +1,8 @@
 object SCM_AH221Agent: TSCM_AH221Agent
   OldCreateOrder = False
   DisplayName = 'SCM_AH221 ADS Agent Service'
-  Left = 116
-  Top = 461
+  Left = 390
+  Top = 421
   Height = 150
   Width = 215
   object Mycomm: TVaComm

@@ -417,7 +417,10 @@ bool __fastcall TSCM_AH221Agent::ReadAdsItem(int index)
         if (ok) item.lValue = nVal;
     }
 
-    item.Quality = ok ? 0 : 9;
+    //item.Quality = ok ? 0 : 9;
+	// 변경 후 - OPC DA 호환 + ESP32/Node-RED 파이프라인 일관성 유지
+	item.Quality = ok ? 0xC0 : 0x00;
+
     return ok;
 }
 
