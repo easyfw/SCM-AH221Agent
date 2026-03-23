@@ -10,14 +10,12 @@
 #include "VaComm.hpp"
 #include <ExtCtrls.hpp>
 #include <IniFiles.hpp>
-
-// ADS Communication Module (verified on equipment PC)
-#include "AdsComm.h"
+#include <ADODB.hpp>        // ADO: replaces AdsComm.h
 
 // Protocol constants (shared with ESP32 - same as GA3)
 #define PROTO_STX       0x02
 #define PROTO_ETX       0x03
-#define MAX_ADS_ITEMS   500
+#define MAX_SQL_ITEMS   500
 
 // Response codes (ESP32 -> Agent - same as GA3)
 #define RESP_CMD_ACK    0x01
@@ -31,25 +29,46 @@
 #define HK_DEBUG        0       // 1=verbose hex dump in log
 
 //---------------------------------------------------------------------------
-// ADS Item Info Structure
+// SQL Item Info Structure
 //
-// [Replaces GA3's TOPCItemInfo]
-//   GA3: OPCItem* pointer, VARIANT varValue/varPrevValue
-//   AH221: IGroup/IOffset addressing, long lValue/lPrevValue
-//   No COM/VARIANT overhead.
+// [Replaces TAdsItemInfo]
+//   ADS version: IGroup/IOffset for PLC memory addressing
+//   SQL version: data comes from DB_PROEDGE tables, already processed
+//   by ProEdge Server. Same lValue/lPrevValue for packet building.
 //---------------------------------------------------------------------------
-struct TAdsItemInfo
+struct TSqlItemInfo
 {
     int         ItemID;         // Unique ID for packet protocol
-    String      VarName;        // PLC variable name (for logging)
-    String      DataType;       // BOOL, BYTE, INT, UINT, DINT, REAL, LREAL
+    String      VarName;        // Column name (for logging)
+    String      DataType;       // INT, FLOAT, STRING
     String      Description;    // Human-readable description
-    unsigned long IGroup;       // ADS Index Group (typically 0x4020)
-    unsigned long IOffset;      // ADS Index Offset (byte offset)
+    String      TableName;      // Source table in DB_PROEDGE
     long        lValue;         // Current value (as long for packet)
     long        lPrevValue;     // Previous value (for change detection)
-    int         Quality;        // 0=Good, 9=Error
+    String      sStrValue;      // String value (for STRING type)
+    int         Quality;        // 0xC0=Good, 0x00=Bad (OPC DA compatible)
     bool        Changed;        // Changed since last successful send
+};
+
+//---------------------------------------------------------------------------
+// Polling Group IDs (for time-tiered SQL polling)
+//---------------------------------------------------------------------------
+enum TPollGroup {
+    pgDailyReport = 0,      // Group A: daily OEE totals (5s)
+    pgProductionReport,     // Group B: per-panel production (5s)
+    pgItemsDataHistory,     // Group C: alarm/state history (30s)
+    pgProductionBatch,      // Group D: batch summary (60s)
+    pgCOUNT                 // sentinel (=4)
+};
+
+struct TPollGroupConfig
+{
+    String  sName;          // INI key / log label
+    int     nIntervalSec;   // Poll interval in seconds
+    int     nCycleCount;    // Cycles elapsed since last poll
+    int     nCyclesNeeded;  // nIntervalSec / (BaseInterval/1000)
+    bool    bEnabled;       // From INI
+    bool    bDataReady;     // New data polled this cycle
 };
 
 //---------------------------------------------------------------------------
@@ -64,19 +83,30 @@ __published:
     void __fastcall ServiceStop(TService *Sender, bool &Stopped);
 
 private:
-    // === ADS Communication (replaces OPC server/group/items) ===
-    TAdsComm*   m_pAds;
+    // === SQL Server (ADO) - replaces TAdsComm* m_pAds ===
+    TADOConnection *m_pADOConn;
+    TADOQuery      *m_pADOQuery;
+    String          m_sConnString;
+    bool            m_bSqlConnected;
 
     // === INI Settings ===
-    String      m_sAmsNetId;        // AMS Net ID
-    int         m_nAdsPort;         // ADS Port (default: 801)
-    int         m_nComPort;         // COM port number
-    int         m_nBaudRate;        // Baud rate
-    int         m_nTimeInterval;    // Timer interval (ms)
+    String      m_sSqlServer;       // replaces m_sAmsNetId
+    String      m_sSqlDatabase;     // replaces m_nAdsPort
+    String      m_sSqlUser;
+    String      m_sSqlPassword;
+    String      m_sSqlProvider;
+    int         m_nComPort;
+    int         m_nBaudRate;
+    int         m_nTimeInterval;    // Base timer interval (ms)
 
-    // === Item Array (ADS version) ===
-    TAdsItemInfo m_Items[MAX_ADS_ITEMS];
+    // === Item Array (SQL version) ===
+    TSqlItemInfo m_Items[MAX_SQL_ITEMS];
     int          m_ItemCount;
+
+    // === Polling Groups ===
+    TPollGroupConfig m_Groups[pgCOUNT];
+    void __fastcall InitPollGroups();
+    bool __fastcall ShouldPollGroup(int grpIdx);
 
     // === Serial Communication (TVaComm - same as GA3) ===
     bool        m_bCommOpened;
@@ -93,21 +123,29 @@ private:
     // === Log ===
     TCHAR       gbuf[65535];
 
-    // --- Logging ---
+    // === History tracking ===
+    String      m_sLastHistoryDate;
+
+    // --- Logging (same as GA3) ---
     void __fastcall LogMessage(String msg);
 
     // --- Settings ---
     void __fastcall LoadSettings();
 
-    // --- CSV Config (6-column ADS format) ---
-    bool __fastcall LoadItemConfig(String filename);
+    // --- SQL Connection ---
+    bool __fastcall ConnectSQL();
+    void __fastcall DisconnectSQL();
+    bool __fastcall ExecuteQuery(String sql);
+
+    // --- Per-group poll functions ---
+    bool __fastcall PollDailyReport();
+    bool __fastcall PollProductionReport();
+    bool __fastcall PollItemsDataHistory();
+    bool __fastcall PollProductionBatch();
 
     // --- Serial Port (TVaComm - same as GA3) ---
     bool __fastcall InitSerialPort(int portNum, int baudRate);
     void __fastcall CloseSerialPort();
-
-    // --- ADS Data Read (replaces OPC Read) ---
-    bool __fastcall ReadAdsItem(int index);
 
     // --- Packet Protocol (same as GA3) ---
     BYTE __fastcall CalcChecksum(BYTE* data, int len);

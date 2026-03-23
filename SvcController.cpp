@@ -1,24 +1,24 @@
 //---------------------------------------------------------------------------
-// SvcController.cpp - SCM-AH221 ADS Agent Service Implementation
+// SvcController.cpp - SCM-AH221 SQL Agent Service Implementation
 //
-// [What changed from GA3 SvcController.cpp]
-//   - Removed: OPC DA code (CoInitialize, CoOPCServer, OPCGroups, AddItem,
-//              pItem->Read, VARIANT handling, GetQualityCode, VariantToLong,
-//              VariantToString, HasAnyChanges)
-//   - Added:   TAdsComm for PLC communication
-//   - Added:   ReadAdsItem() for typed ADS reads
-//   - Changed: LoadSettings() adds [ADS] section
-//   - Changed: LoadItemConfig() CSV 6-column format (+ IGroup/IOffset)
-//   - Changed: BuildPacket() uses lValue directly (no VARIANT)
-//   - Changed: ServiceStart() ADS connect instead of OPC
-//   - Changed: ServiceStop() ADS disconnect instead of OPC
+// [What changed from ADS version]
+//   - Removed: AdsComm.h, TAdsComm, ReadAdsItem(), ADS connect/disconnect
+//   - Removed: EdgeDouble:: namespace references
+//   - Added:   ADO (TADOConnection, TADOQuery) for SQL Server access
+//   - Added:   ConnectSQL(), DisconnectSQL(), ExecuteQuery()
+//   - Added:   PollDailyReport(), PollProductionReport(), etc.
+//   - Added:   Time-tiered polling per table group
+//   - Changed: LoadSettings() [ADS] -> [SQL] section
+//   - Changed: LoadItemConfig() removed (items registered in code)
+//   - Changed: Timer1Timer() SQL poll + change detect + send
 //
-// [Kept identical to GA3]
-//   - TVaComm serial communication (Mycomm)
+// [Kept identical to ADS/GA3 version]
+//   - TVaComm serial (Mycomm), InitSerialPort, CloseSerialPort
 //   - Packet format [STX][LEN][CNT][ID][Q][VAL]...[CHK][ETX]
 //   - Change detection, Heartbeat, ACK/NAK
 //   - Log file rotation (60KB)
 //   - WaitForResponse(), HandleSendFailure(), SendToESP32()
+//   - CalcChecksum(), BuildPacket(), IsValueChanged()
 //
 // [ASCII Only]
 //---------------------------------------------------------------------------
@@ -45,7 +45,9 @@ __fastcall TSCM_AH221Agent::TSCM_AH221Agent(TComponent* Owner)
     this->OnStop  = ServiceStop;
     lstrcpy(gbuf, "[SCM-AH221 Service Log]\r\n");
 
-    m_pAds = NULL;
+    m_pADOConn = NULL;
+    m_pADOQuery = NULL;
+    m_bSqlConnected = false;
     m_ItemCount = 0;
     m_bCommOpened = false;
     m_bFirstSend = true;
@@ -59,12 +61,23 @@ __fastcall TSCM_AH221Agent::TSCM_AH221Agent(TComponent* Owner)
     m_dwLastSendTick = 0;
     m_dwHeartbeatInterval = 5000;
 
-    // Default settings (overridden by INI)
-    m_sAmsNetId = EdgeDouble::AMS_NET_ID;
-    m_nAdsPort = EdgeDouble::ADS_PORT;
+    // Default settings
+    m_sSqlServer   = ".\\SCMGROUPEXPRESS";
+    m_sSqlDatabase = "DB_PROEDGE";
+    m_sSqlUser     = "sa";
+    m_sSqlPassword = "Passw0rd";
+    m_sSqlProvider = "SQLOLEDB";
     m_nComPort = 3;
     m_nBaudRate = 115200;
     m_nTimeInterval = 5000;
+
+    m_sLastHistoryDate = "";
+
+    for (int i = 0; i < pgCOUNT; i++)
+    {
+        m_Groups[i].nCycleCount = 0;
+        m_Groups[i].bDataReady = false;
+    }
 }
 
 //---------------------------------------------------------------------------
@@ -79,7 +92,7 @@ void __stdcall ServiceController(unsigned CtrlCode)
 }
 
 //---------------------------------------------------------------------------
-// LogMessage (identical to GA3)
+// LogMessage (identical to GA3/ADS version)
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::LogMessage(String msg)
 {
@@ -145,7 +158,8 @@ void __fastcall TSCM_AH221Agent::LogMessage(String msg)
 
 //---------------------------------------------------------------------------
 // LoadSettings
-//   [Added vs GA3]: [ADS] section with AmsNetId and AdsPort
+//   [Changed]: [ADS] section -> [SQL] section
+//   [Added]:   [PollIntervals] section
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::LoadSettings()
 {
@@ -154,9 +168,18 @@ void __fastcall TSCM_AH221Agent::LoadSettings()
     TIniFile *ini = new TIniFile(IniPath);
     try
     {
-        // [ADS] section (new for AH221)
-        m_sAmsNetId = ini->ReadString("ADS", "AmsNetId", EdgeDouble::AMS_NET_ID);
-        m_nAdsPort = ini->ReadInteger("ADS", "AdsPort", EdgeDouble::ADS_PORT);
+        // [SQL] section (replaces [ADS])
+        m_sSqlServer   = ini->ReadString("SQL", "Server",   ".\\SCMGROUPEXPRESS");
+        m_sSqlDatabase = ini->ReadString("SQL", "Database", "DB_PROEDGE");
+        m_sSqlUser     = ini->ReadString("SQL", "User",     "sa");
+        m_sSqlPassword = ini->ReadString("SQL", "Password", "Passw0rd");
+        m_sSqlProvider = ini->ReadString("SQL", "Provider", "SQLOLEDB");
+
+        m_sConnString = "Provider=" + m_sSqlProvider + ";"
+                      + "Data Source=" + m_sSqlServer + ";"
+                      + "Initial Catalog=" + m_sSqlDatabase + ";"
+                      + "User ID=" + m_sSqlUser + ";"
+                      + "Password=" + m_sSqlPassword + ";";
 
         // [Communication] section (same as GA3)
         String comStr = ini->ReadString("Communication", "COM_Port", "COM3");
@@ -167,10 +190,30 @@ void __fastcall TSCM_AH221Agent::LoadSettings()
 
         m_nBaudRate = ini->ReadInteger("Communication", "BaudRate", 115200);
 
-        // [Agent] section (same as GA3)
+        // [Agent] section
         m_nTimeInterval = ini->ReadInteger("Agent", "TimeInterval", 5000);
 
-        LogMessage("CFG: ADS=" + m_sAmsNetId + ":" + IntToStr(m_nAdsPort)
+        // [PollIntervals] section
+        int defaults[pgCOUNT] = { 5, 5, 30, 60 };
+        String names[pgCOUNT] = { "DailyReport", "ProductionReport",
+                                   "ItemsDataHistory", "ProductionBatch" };
+        int baseIntervalSec = m_nTimeInterval / 1000;
+        if (baseIntervalSec < 1) baseIntervalSec = 1;
+
+        for (int i = 0; i < pgCOUNT; i++)
+        {
+            m_Groups[i].sName = names[i];
+            m_Groups[i].nIntervalSec = ini->ReadInteger("PollIntervals",
+                names[i], defaults[i]);
+            m_Groups[i].bEnabled = ini->ReadBool("PollIntervals",
+                names[i] + "_Enabled", true);
+            m_Groups[i].nCyclesNeeded = m_Groups[i].nIntervalSec / baseIntervalSec;
+            if (m_Groups[i].nCyclesNeeded < 1) m_Groups[i].nCyclesNeeded = 1;
+            m_Groups[i].nCycleCount = m_Groups[i].nCyclesNeeded; // poll first cycle
+            m_Groups[i].bDataReady = false;
+        }
+
+        LogMessage("CFG: SQL=" + m_sSqlServer + "/" + m_sSqlDatabase
                  + " COM" + IntToStr(m_nComPort)
                  + " " + IntToStr(m_nBaudRate)
                  + " T:" + IntToStr(m_nTimeInterval));
@@ -182,100 +225,261 @@ void __fastcall TSCM_AH221Agent::LoadSettings()
 }
 
 //---------------------------------------------------------------------------
-// LoadItemConfig
-//   [Changed vs GA3]: 6-column CSV (ItemID,VarName,DataType,IGroup,IOffset,Desc)
-//   GA3 was 4-column:  (ItemID,TagName,DataType,Description)
+// InitPollGroups (called after LoadSettings)
 //---------------------------------------------------------------------------
-bool __fastcall TSCM_AH221Agent::LoadItemConfig(String filename)
+void __fastcall TSCM_AH221Agent::InitPollGroups()
 {
-    TStringList *lines = new TStringList();
-    m_ItemCount = 0;
-
-    try
+    for (int i = 0; i < pgCOUNT; i++)
     {
-        if (!FileExists(filename))
-        {
-            LogMessage("Config file not found: " + filename);
-            delete lines;
-            return false;
-        }
-
-        lines->LoadFromFile(filename);
-        LogMessage("Loading config: " + filename + " (" + IntToStr(lines->Count) + " lines)");
-
-        for (int i = 1; i < lines->Count && m_ItemCount < MAX_ADS_ITEMS; i++)
-        {
-            String line = lines->Strings[i].Trim();
-            if (line.IsEmpty() || line[1] == '#')
-                continue;
-
-            // Manual CSV parsing (same approach as GA3)
-            String cols[6];
-            int colIndex = 0;
-            String temp = "";
-
-            for (int j = 1; j <= line.Length(); j++)
-            {
-                if (line[j] == ',')
-                {
-                    if (colIndex < 6) cols[colIndex] = temp.Trim();
-                    temp = "";
-                    colIndex++;
-                }
-                else
-                {
-                    temp += line[j];
-                }
-            }
-            if (colIndex < 6) cols[colIndex] = temp.Trim();
-
-            // Need at least: ItemID(0), DataType(2), IGroup(3), IOffset(4)
-            if (cols[0].IsEmpty() || cols[2].IsEmpty() || cols[3].IsEmpty() || cols[4].IsEmpty())
-                continue;
-
-            m_Items[m_ItemCount].ItemID = StrToIntDef(cols[0], 0);
-            m_Items[m_ItemCount].VarName = cols[1];
-            m_Items[m_ItemCount].DataType = cols[2].UpperCase();
-
-            // Parse IGroup: "0x4020" or "16448"
-            String sIG = cols[3];
-            if (sIG.SubString(1, 2).LowerCase() == "0x")
-                m_Items[m_ItemCount].IGroup = StrToInt("$" + sIG.SubString(3, sIG.Length() - 2));
-            else
-                m_Items[m_ItemCount].IGroup = StrToIntDef(sIG, 0x4020);
-
-            m_Items[m_ItemCount].IOffset = StrToIntDef(cols[4], 0);
-            m_Items[m_ItemCount].Description = cols[5];
-
-            m_Items[m_ItemCount].lValue = 0;
-            m_Items[m_ItemCount].lPrevValue = 0;
-            m_Items[m_ItemCount].Quality = 0;
-            m_Items[m_ItemCount].Changed = false;
-
-            LogMessage("  Item[" + IntToStr(m_ItemCount) + "]: ID="
-                     + IntToStr(m_Items[m_ItemCount].ItemID)
-                     + " " + m_Items[m_ItemCount].VarName
-                     + " " + m_Items[m_ItemCount].DataType
-                     + " IG=" + IntToHex((int)m_Items[m_ItemCount].IGroup, 4)
-                     + " IO=" + IntToStr((int)m_Items[m_ItemCount].IOffset));
-
-            m_ItemCount++;
-        }
-        LogMessage("Loaded " + IntToStr(m_ItemCount) + " items from config.");
+        LogMessage("  Poll " + m_Groups[i].sName
+                 + ": " + IntToStr(m_Groups[i].nIntervalSec) + "s"
+                 + " cyc=" + IntToStr(m_Groups[i].nCyclesNeeded)
+                 + (m_Groups[i].bEnabled ? " ON" : " OFF"));
     }
-    catch (Exception &ex)
-    {
-        LogMessage("Error loading config: " + ex.Message);
-        delete lines;
-        return false;
-    }
-
-    delete lines;
-    return (m_ItemCount > 0);
 }
 
 //---------------------------------------------------------------------------
-// InitSerialPort (identical to GA3 - TVaComm)
+bool __fastcall TSCM_AH221Agent::ShouldPollGroup(int grpIdx)
+{
+    if (!m_Groups[grpIdx].bEnabled) return false;
+    m_Groups[grpIdx].nCycleCount++;
+    if (m_Groups[grpIdx].nCycleCount >= m_Groups[grpIdx].nCyclesNeeded)
+    {
+        m_Groups[grpIdx].nCycleCount = 0;
+        return true;
+    }
+    return false;
+}
+
+//---------------------------------------------------------------------------
+// SQL Connection Management
+//   [Replaces TAdsComm::Connect/Disconnect]
+//   ADO needs CoInitialize (COM subsystem) just like OPC DA did in GA3.
+//---------------------------------------------------------------------------
+bool __fastcall TSCM_AH221Agent::ConnectSQL()
+{
+    try
+    {
+        if (m_pADOConn == NULL)
+        {
+            CoInitialize(NULL);
+            m_pADOConn = new TADOConnection(NULL);
+            m_pADOConn->LoginPrompt = false;
+            m_pADOConn->ConnectionTimeout = 10;
+            m_pADOConn->CommandTimeout = 15;
+            m_pADOQuery = new TADOQuery(NULL);
+            m_pADOQuery->Connection = m_pADOConn;
+        }
+        m_pADOConn->ConnectionString = m_sConnString;
+        m_pADOConn->Connected = true;
+        m_bSqlConnected = true;
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("SQL CONN: " + e.Message);
+        m_bSqlConnected = false;
+        return false;
+    }
+}
+
+void __fastcall TSCM_AH221Agent::DisconnectSQL()
+{
+    try
+    {
+        if (m_pADOQuery)
+        {
+            if (m_pADOQuery->Active) m_pADOQuery->Close();
+            delete m_pADOQuery; m_pADOQuery = NULL;
+        }
+        if (m_pADOConn)
+        {
+            if (m_pADOConn->Connected) m_pADOConn->Connected = false;
+            delete m_pADOConn; m_pADOConn = NULL;
+        }
+        CoUninitialize();
+    }
+    catch (Exception &e) { LogMessage("SQL DISC: " + e.Message); }
+    m_bSqlConnected = false;
+}
+
+bool __fastcall TSCM_AH221Agent::ExecuteQuery(String sql)
+{
+    try
+    {
+        if (!m_bSqlConnected) return false;
+        m_pADOQuery->Close();
+        m_pADOQuery->SQL->Clear();
+        m_pADOQuery->SQL->Add(sql);
+        m_pADOQuery->Open();
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("SQL QRY: " + e.Message);
+        m_bSqlConnected = false;
+        try { m_pADOConn->Connected = false; } catch(...) {}
+        return false;
+    }
+}
+
+//---------------------------------------------------------------------------
+// Per-group SQL poll functions
+//   [Replaces ReadAdsItem()]
+//   Each function queries one table and updates matching items in m_Items[].
+//---------------------------------------------------------------------------
+bool __fastcall TSCM_AH221Agent::PollDailyReport()
+{
+    try
+    {
+        String sql =
+            "SELECT TOP 1 DayDate, MacOn, MacInStart, MacInAlarm, "
+            "TrackInRun, MacInManual "
+            "FROM CustomTable6_DailyReport ORDER BY DayDate DESC";
+
+        if (!ExecuteQuery(sql) || m_pADOQuery->RecordCount == 0) return false;
+
+        for (int i = 0; i < m_ItemCount; i++)
+        {
+            if (m_Items[i].TableName != "CustomTable6_DailyReport") continue;
+            m_Items[i].lPrevValue = m_Items[i].lValue;
+
+            try
+            {
+                if (m_Items[i].DataType == "STRING")
+                    m_Items[i].sStrValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsString;
+                else
+                    m_Items[i].lValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsInteger;
+                m_Items[i].Quality = 0xC0;  // Good
+            }
+            catch (...) { m_Items[i].Quality = 0x00; }
+        }
+
+        if (HK_DEBUG)
+            LogMessage("DR: MacOn=" + m_pADOQuery->FieldByName("MacOn")->AsString);
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("POLL DR: " + e.Message);
+        return false;
+    }
+}
+
+bool __fastcall TSCM_AH221Agent::PollProductionReport()
+{
+    try
+    {
+        String sql =
+            "SELECT TOP 1 Event, Quantity, L, W, T, "
+            "ProgramCode, EdgeCodeLH, EdgeCodeRH "
+            "FROM CustomTable5_ProductionReport ORDER BY Event DESC";
+
+        if (!ExecuteQuery(sql) || m_pADOQuery->RecordCount == 0) return false;
+
+        for (int i = 0; i < m_ItemCount; i++)
+        {
+            if (m_Items[i].TableName != "CustomTable5_ProductionReport") continue;
+            m_Items[i].lPrevValue = m_Items[i].lValue;
+
+            try
+            {
+                if (m_Items[i].DataType == "STRING")
+                    m_Items[i].sStrValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsString;
+                else if (m_Items[i].DataType == "FLOAT")
+                    m_Items[i].lValue = (long)(m_pADOQuery->FieldByName(m_Items[i].VarName)->AsFloat * 1000);
+                else
+                    m_Items[i].lValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsInteger;
+                m_Items[i].Quality = 0xC0;
+            }
+            catch (...) { m_Items[i].Quality = 0x00; }
+        }
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("POLL PR: " + e.Message);
+        return false;
+    }
+}
+
+bool __fastcall TSCM_AH221Agent::PollItemsDataHistory()
+{
+    try
+    {
+        String sql;
+        if (m_sLastHistoryDate.IsEmpty())
+            sql = "SELECT TOP 5 Date, ItemID, Value "
+                  "FROM ItemsDataHistory ORDER BY Date DESC";
+        else
+            sql = "SELECT TOP 20 Date, ItemID, Value "
+                  "FROM ItemsDataHistory "
+                  "WHERE Date > '" + m_sLastHistoryDate + "' "
+                  "ORDER BY Date DESC";
+
+        if (!ExecuteQuery(sql)) return false;
+        if (m_pADOQuery->RecordCount == 0) return true;  // no new events
+
+        // Update items with most recent row
+        for (int i = 0; i < m_ItemCount; i++)
+        {
+            if (m_Items[i].TableName != "ItemsDataHistory") continue;
+            m_Items[i].lPrevValue = m_Items[i].lValue;
+
+            try
+            {
+                if (m_Items[i].VarName == "ItemID")
+                    m_Items[i].lValue = m_pADOQuery->FieldByName("ItemID")->AsInteger;
+                else if (m_Items[i].VarName == "Value")
+                    m_Items[i].lValue = StrToIntDef(m_pADOQuery->FieldByName("Value")->AsString, 0);
+                m_Items[i].Quality = 0xC0;
+            }
+            catch (...) { m_Items[i].Quality = 0x00; }
+        }
+
+        m_sLastHistoryDate = m_pADOQuery->FieldByName("Date")->AsString;
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("POLL HIS: " + e.Message);
+        return false;
+    }
+}
+
+bool __fastcall TSCM_AH221Agent::PollProductionBatch()
+{
+    try
+    {
+        String sql =
+            "SELECT TOP 1 BatchCode, PanelCode, Phase1, Phase2, Quantity "
+            "FROM CustomTable3_Production ORDER BY BatchCode DESC";
+
+        if (!ExecuteQuery(sql) || m_pADOQuery->RecordCount == 0) return false;
+
+        for (int i = 0; i < m_ItemCount; i++)
+        {
+            if (m_Items[i].TableName != "CustomTable3_Production") continue;
+            m_Items[i].lPrevValue = m_Items[i].lValue;
+
+            try
+            {
+                m_Items[i].lValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsInteger;
+                m_Items[i].Quality = 0xC0;
+            }
+            catch (...) { m_Items[i].Quality = 0x00; }
+        }
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("POLL BAT: " + e.Message);
+        return false;
+    }
+}
+
+//---------------------------------------------------------------------------
+// InitSerialPort (identical to ADS/GA3 version)
 //---------------------------------------------------------------------------
 bool __fastcall TSCM_AH221Agent::InitSerialPort(int portNum, int baudRate)
 {
@@ -348,83 +552,6 @@ void __fastcall TSCM_AH221Agent::CloseSerialPort()
 }
 
 //---------------------------------------------------------------------------
-// ReadAdsItem - Read one PLC variable via ADS
-//
-// [Replaces GA3's OPCItem->Read() + VariantToLong() pipeline]
-//   GA3: pItem->Read(2, &varValue, &varQuality, &varTimestamp)
-//        then VariantToLong(varValue) to convert VARIANT -> long
-//   AH221: m_pAds->ReadInt(IGroup, IOffset, nVal)
-//          direct typed read, no VARIANT involved
-//
-//   REAL/LREAL x1000 for fixed-point: same as GA3's VariantToLong VT_R4/R8
-//---------------------------------------------------------------------------
-bool __fastcall TSCM_AH221Agent::ReadAdsItem(int index)
-{
-    if (index < 0 || index >= m_ItemCount) return false;
-    if (!m_pAds || !m_pAds->IsConnected()) return false;
-
-    TAdsItemInfo &item = m_Items[index];
-    String dt = item.DataType;
-    bool ok = false;
-
-    if (dt == "BOOL")
-    {
-        bool bVal = false;
-        ok = m_pAds->ReadBool(item.IGroup, item.IOffset, bVal);
-        if (ok) item.lValue = bVal ? 1 : 0;
-    }
-    else if (dt == "BYTE")
-    {
-        unsigned char bVal = 0;
-        ok = m_pAds->ReadByte(item.IGroup, item.IOffset, bVal);
-        if (ok) item.lValue = (long)bVal;
-    }
-    else if (dt == "INT")
-    {
-        short nVal = 0;
-        ok = m_pAds->ReadInt(item.IGroup, item.IOffset, nVal);
-        if (ok) item.lValue = (long)nVal;
-    }
-    else if (dt == "UINT")
-    {
-        unsigned short nVal = 0;
-        ok = m_pAds->ReadUInt(item.IGroup, item.IOffset, nVal);
-        if (ok) item.lValue = (long)nVal;
-    }
-    else if (dt == "DINT")
-    {
-        long nVal = 0;
-        ok = m_pAds->ReadDInt(item.IGroup, item.IOffset, nVal);
-        if (ok) item.lValue = nVal;
-    }
-    else if (dt == "REAL")
-    {
-        float fVal = 0.0f;
-        ok = m_pAds->ReadReal(item.IGroup, item.IOffset, fVal);
-        if (ok) item.lValue = (long)(fVal * 1000);
-    }
-    else if (dt == "LREAL")
-    {
-        double dVal = 0.0;
-        ok = m_pAds->ReadLReal(item.IGroup, item.IOffset, dVal);
-        if (ok) item.lValue = (long)(dVal * 1000);
-    }
-    else
-    {
-        // Unknown type - try as DINT (4 bytes)
-        long nVal = 0;
-        ok = m_pAds->ReadDInt(item.IGroup, item.IOffset, nVal);
-        if (ok) item.lValue = nVal;
-    }
-
-    //item.Quality = ok ? 0 : 9;
-	// 변경 후 - OPC DA 호환 + ESP32/Node-RED 파이프라인 일관성 유지
-	item.Quality = ok ? 0xC0 : 0x00;
-
-    return ok;
-}
-
-//---------------------------------------------------------------------------
 // CalcChecksum (identical to GA3)
 //---------------------------------------------------------------------------
 BYTE __fastcall TSCM_AH221Agent::CalcChecksum(BYTE* data, int len)
@@ -436,7 +563,7 @@ BYTE __fastcall TSCM_AH221Agent::CalcChecksum(BYTE* data, int len)
 }
 
 //---------------------------------------------------------------------------
-// IsValueChanged (simplified - no VARIANT needed)
+// IsValueChanged (same as ADS version)
 //---------------------------------------------------------------------------
 bool __fastcall TSCM_AH221Agent::IsValueChanged(int index)
 {
@@ -445,15 +572,8 @@ bool __fastcall TSCM_AH221Agent::IsValueChanged(int index)
 }
 
 //---------------------------------------------------------------------------
-// BuildPacket - identical format to GA3
+// BuildPacket - identical format to GA3/ADS version
 //   [STX][LEN_L][LEN_H][CNT][ID_L][ID_H][Q][V0][V1][V2][V3]...[CHK][ETX]
-//
-// [Difference from GA3]
-//   GA3: GetQualityCode(m_Items[i].Quality) decodes OPC bitmask
-//   AH221: Quality already 0=Good or 9=Error from ReadAdsItem()
-//
-//   GA3: VariantToLong(m_Items[i].varValue)
-//   AH221: m_Items[i].lValue directly
 //---------------------------------------------------------------------------
 int __fastcall TSCM_AH221Agent::BuildPacket(BYTE* buffer)
 {
@@ -494,7 +614,7 @@ int __fastcall TSCM_AH221Agent::BuildPacket(BYTE* buffer)
 }
 
 //---------------------------------------------------------------------------
-// SendToESP32 (identical to GA3 - TVaComm version)
+// SendToESP32 (identical to ADS/GA3 version - TVaComm)
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
 {
@@ -544,7 +664,6 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
         else
         {
             logMsg += " FAIL";
-//            HandleSendFailure();
         }
 
         LogMessage(logMsg);
@@ -552,12 +671,11 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
     catch (Exception &ex)
     {
         LogMessage("E:" + ex.Message);
-//        HandleSendFailure();
     }
 }
 
 //---------------------------------------------------------------------------
-// WaitForResponse (identical to GA3 - TVaComm version)
+// WaitForResponse (identical to ADS/GA3 version - TVaComm)
 //---------------------------------------------------------------------------
 bool __fastcall TSCM_AH221Agent::WaitForResponse(int timeoutMs)
 {
@@ -640,24 +758,17 @@ void __fastcall TSCM_AH221Agent::HandleSendFailure()
 //---------------------------------------------------------------------------
 // ServiceStart
 //
-// [GA3 vs AH221 startup]
-//   GA3:                              AH221:
-//   1. CoInitialize(NULL)             1. (not needed - no COM)
-//   2. LoadSettings()                 2. LoadSettings()
-//   3. LoadItemConfig() 4-col         3. LoadItemConfig() 6-col
-//   4. InitSerialPort()               4. InitSerialPort() <- same
-//   5. OPCServer->Connect()           5. TAdsComm::Connect()
-//   6. Create OPC Group               6. (not needed)
-//   7. AddItem for each tag           7. (not needed)
-//   8. Sleep(2000)                    8. Sleep(1000)
-//   9. Initial OPC Read               9. Initial ADS Read
-//  10. Start Timer                   10. Start Timer <- same
+// [Difference from ADS version]
+//   ADS: TAdsComm::Connect() + initial ADS reads
+//   SQL: ConnectSQL() + register items + initial SQL poll
+//   No AdsComm.h, no TcAdsDll.dll needed
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
 {
     if (Timer1) Timer1->Enabled = false;
 
-    // No CoInitialize needed (ADS does not use COM subsystem)
+    // ADO needs COM subsystem (same as GA3's OPC DA)
+    // Moved to ConnectSQL() for cleaner lifecycle management
 
     LogMessage("SVC START");
     Started = true;
@@ -666,37 +777,117 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
     {
         // 0. Load INI
         LoadSettings();
+        InitPollGroups();
 
-        // 1. Load CSV config
-        String exePath = ExtractFilePath(ParamStr(0));
-        String configFile = exePath + "oem_param.csv";
+        // 1. Register SQL data items
+        //    [Replaces LoadItemConfig() CSV parsing]
+        //    Items are defined here instead of CSV because SQL polling
+        //    queries entire rows, not individual PLC addresses.
+        m_ItemCount = 0;
 
-        if (!LoadItemConfig(configFile))
-        {
-            // Default: known EdgeDbl PLC variables (tested)
-            LogMessage("CFG: default items");
+        // --- DailyReport items (ID 1-6) ---
+        m_Items[m_ItemCount].ItemID = 1;  m_Items[m_ItemCount].VarName = "MacOn";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable6_DailyReport";
+        m_Items[m_ItemCount].Description = "Machine On (sec)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
 
-            m_ItemCount = 5;
-            m_Items[0].ItemID = 1; m_Items[0].VarName = "cMaxPann";
-            m_Items[0].DataType = "INT"; m_Items[0].IGroup = 0x4020; m_Items[0].IOffset = 584;
-            m_Items[1].ItemID = 2; m_Items[1].VarName = "cMaxPrg";
-            m_Items[1].DataType = "INT"; m_Items[1].IGroup = 0x4020; m_Items[1].IOffset = 588;
-            m_Items[2].ItemID = 3; m_Items[2].VarName = "cMaxAlm";
-            m_Items[2].DataType = "INT"; m_Items[2].IGroup = 0x4020; m_Items[2].IOffset = 590;
-            m_Items[3].ItemID = 4; m_Items[3].VarName = "cMaxWrn";
-            m_Items[3].DataType = "INT"; m_Items[3].IGroup = 0x4020; m_Items[3].IOffset = 592;
-            m_Items[4].ItemID = 5; m_Items[4].VarName = "cMaxMsg";
-            m_Items[4].DataType = "INT"; m_Items[4].IGroup = 0x4020; m_Items[4].IOffset = 594;
+        m_Items[m_ItemCount].ItemID = 2;  m_Items[m_ItemCount].VarName = "MacInStart";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable6_DailyReport";
+        m_Items[m_ItemCount].Description = "Machine In Start (sec)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
 
-            for (int i = 0; i < m_ItemCount; i++)
-            {
-                m_Items[i].Description = "";
-                m_Items[i].lValue = 0;
-                m_Items[i].lPrevValue = 0;
-                m_Items[i].Quality = 0;
-                m_Items[i].Changed = false;
-            }
-        }
+        m_Items[m_ItemCount].ItemID = 3;  m_Items[m_ItemCount].VarName = "MacInAlarm";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable6_DailyReport";
+        m_Items[m_ItemCount].Description = "Machine In Alarm (sec)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 4;  m_Items[m_ItemCount].VarName = "TrackInRun";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable6_DailyReport";
+        m_Items[m_ItemCount].Description = "Track In Run (sec)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 5;  m_Items[m_ItemCount].VarName = "MacInManual";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable6_DailyReport";
+        m_Items[m_ItemCount].Description = "Machine In Manual (sec)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        // --- ProductionReport items (ID 10-16) ---
+        m_Items[m_ItemCount].ItemID = 10; m_Items[m_ItemCount].VarName = "Quantity";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Panel count";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 11; m_Items[m_ItemCount].VarName = "L";
+        m_Items[m_ItemCount].DataType = "FLOAT"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Length (mm*1000)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 12; m_Items[m_ItemCount].VarName = "W";
+        m_Items[m_ItemCount].DataType = "FLOAT"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Width (mm*1000)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 13; m_Items[m_ItemCount].VarName = "T";
+        m_Items[m_ItemCount].DataType = "FLOAT"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Thickness (mm*1000)";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        // --- ItemsDataHistory items (ID 30-31) ---
+        m_Items[m_ItemCount].ItemID = 30; m_Items[m_ItemCount].VarName = "ItemID";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "ItemsDataHistory";
+        m_Items[m_ItemCount].Description = "Latest alarm ItemID";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 31; m_Items[m_ItemCount].VarName = "Value";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "ItemsDataHistory";
+        m_Items[m_ItemCount].Description = "Latest alarm Value";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        // --- ProductionBatch items (ID 20-24) ---
+        m_Items[m_ItemCount].ItemID = 20; m_Items[m_ItemCount].VarName = "BatchCode";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].Description = "Batch code";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 21; m_Items[m_ItemCount].VarName = "PanelCode";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].Description = "Panel code";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 22; m_Items[m_ItemCount].VarName = "Quantity";
+        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].Description = "Batch quantity";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        LogMessage("Items: " + IntToStr(m_ItemCount));
 
         // 2. Serial port (TVaComm - same as GA3)
         if (!InitSerialPort(m_nComPort, m_nBaudRate))
@@ -704,66 +895,29 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
             LogMessage("COM FAIL");
         }
 
-        // 3. ADS connect (replaces GA3 steps 3-5: OPC connect + group + items)
-        m_pAds = new TAdsComm();
-
-        if (!m_pAds->IsDllLoaded())
+        // 3. SQL connect (replaces ADS connect)
+        if (ConnectSQL())
         {
-            LogMessage("ADS DLL FAIL: " + m_pAds->GetLastError());
+            LogMessage("SQL Connected: " + m_sSqlServer + "/" + m_sSqlDatabase);
         }
         else
         {
-            LogMessage("ADS DLL loaded OK");
-
-            if (m_pAds->Connect(m_sAmsNetId, m_nAdsPort))
-            {
-                LogMessage("ADS Connected: " + m_sAmsNetId + ":" + IntToStr(m_nAdsPort));
-
-                AnsiString sDevName;
-                unsigned short nVersion;
-                if (m_pAds->GetDeviceInfo(sDevName, nVersion))
-                {
-                    LogMessage("ADS Device: " + sDevName + " v" + IntToStr(nVersion));
-                }
-            }
-            else
-            {
-                LogMessage("ADS Connect FAIL: " + m_pAds->GetLastError());
-            }
+            LogMessage("SQL Connect FAIL - will retry");
         }
 
-        // 4. Wait for PLC stabilize (GA3 used 2000ms for OPC warmup,
-        //    ADS is stateless so 1000ms is enough)
-        Sleep(1000);
-
-        // 5. Initial read test
-        if (m_pAds && m_pAds->IsConnected())
+        // 4. Initial poll test
+        if (m_bSqlConnected)
         {
-            int readOk = 0;
-            for (int i = 0; i < m_ItemCount; i++)
-            {
-                if (ReadAdsItem(i))
-                {
-                    m_Items[i].lPrevValue = m_Items[i].lValue;
-                    readOk++;
-                    LogMessage("INIT RD[" + IntToStr(i) + "] "
-                             + m_Items[i].VarName + " = "
-                             + IntToStr(m_Items[i].lValue));
-                }
-                else
-                {
-                    LogMessage("INIT RD ERR[" + IntToStr(i) + "] "
-                             + m_Items[i].VarName + ": "
-                             + m_pAds->GetLastError());
-                }
-            }
-            LogMessage("INIT: " + IntToStr(readOk) + "/" + IntToStr(m_ItemCount) + " OK");
+            if (PollDailyReport())
+                LogMessage("INIT DR OK");
+            if (PollProductionReport())
+                LogMessage("INIT PR OK");
         }
 
         m_bFirstSend = true;
         m_dwLastSendTick = 0;
 
-        // 6. Start timer (same as GA3)
+        // 5. Start timer (same as GA3)
         if (Timer1)
         {
             Timer1->Interval = m_nTimeInterval;
@@ -785,9 +939,9 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
 
 //---------------------------------------------------------------------------
 // ServiceStop
-//   [Difference from GA3]
-//   GA3: VariantClear each item, OPCServer->Disconnect(), CoUninitialize()
-//   AH221: TAdsComm::Disconnect() + delete, no VARIANT/COM cleanup
+//   [Difference from ADS version]
+//   ADS: TAdsComm::Disconnect() + delete
+//   SQL: DisconnectSQL() (includes CoUninitialize)
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::ServiceStop(TService *Sender, bool &Stopped)
 {
@@ -796,22 +950,7 @@ void __fastcall TSCM_AH221Agent::ServiceStop(TService *Sender, bool &Stopped)
     if (Timer1) Timer1->Enabled = false;
 
     CloseSerialPort();
-
-    try
-    {
-        if (m_pAds)
-        {
-            m_pAds->Disconnect();
-            delete m_pAds;
-            m_pAds = NULL;
-        }
-    }
-    catch (Exception &ex)
-    {
-        LogMessage("E:" + ex.Message);
-    }
-
-    // No CoUninitialize needed
+    DisconnectSQL();
 
     Stopped = true;
     LogMessage("SVC END");
@@ -819,7 +958,9 @@ void __fastcall TSCM_AH221Agent::ServiceStop(TService *Sender, bool &Stopped)
 
 //---------------------------------------------------------------------------
 // Timer1Timer - Main polling loop
-//   Same flow as GA3, only the read method changed (ADS vs OPC)
+//   [Difference from ADS version]
+//   ADS: ReadAdsItem() for each item, then change detect, then send
+//   SQL: Per-group polling with cycle counters, then change detect, then send
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::Timer1Timer(TObject *Sender)
 {
@@ -827,15 +968,35 @@ void __fastcall TSCM_AH221Agent::Timer1Timer(TObject *Sender)
 
     try
     {
-        if (m_pAds != NULL && m_pAds->IsConnected() && m_ItemCount > 0)
+        // SQL reconnect if needed (replaces ADS reconnect)
+        if (!m_bSqlConnected)
         {
-            // 1. Read all ADS items
-            for (int i = 0; i < m_ItemCount; i++)
+            LogMessage("SQL reconnecting...");
+            if (ConnectSQL())
+                LogMessage("SQL reconnected OK");
+            else
             {
-                ReadAdsItem(i);
+                Timer1->Enabled = true;
+                return;
             }
+        }
 
-            // 2. Change detection (identical to GA3)
+        if (m_bSqlConnected && m_ItemCount > 0)
+        {
+            // 1. Time-tiered SQL polling
+            if (ShouldPollGroup(pgDailyReport))
+                PollDailyReport();
+
+            if (ShouldPollGroup(pgProductionReport))
+                PollProductionReport();
+
+            if (ShouldPollGroup(pgItemsDataHistory))
+                PollItemsDataHistory();
+
+            if (ShouldPollGroup(pgProductionBatch))
+                PollProductionBatch();
+
+            // 2. Change detection (identical to GA3/ADS)
             int changeCount = 0;
             for (int i = 0; i < m_ItemCount; i++)
             {
@@ -876,15 +1037,6 @@ void __fastcall TSCM_AH221Agent::Timer1Timer(TObject *Sender)
                 m_dwLastSendTick = GetTickCount();
 
                 m_bFirstSend = false;
-            }
-        }
-        else if (m_pAds != NULL && !m_pAds->IsConnected())
-        {
-            // ADS disconnected - attempt reconnect
-            LogMessage("ADS reconnecting...");
-            if (m_pAds->Connect(m_sAmsNetId, m_nAdsPort))
-            {
-                LogMessage("ADS reconnected OK");
             }
         }
     }

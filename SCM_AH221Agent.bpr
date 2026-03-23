@@ -4,15 +4,15 @@
   <MACROS>
     <VERSION value="BCB.06.00"/>
     <PROJECT value="SCM_AH221Agent.exe"/>
-    <OBJFILES value="SCM_AH221Agent.obj SvcController.obj AdsComm.obj"/>
+    <OBJFILES value="SCM_AH221Agent.obj SvcController.obj"/>
     <RESFILES value="SCM_AH221Agent.res"/>
     <IDLFILES value=""/>
     <IDLGENFILES value=""/>
     <DEFFILE value=""/>
     <RESDEPEN value="$(RESFILES) SvcController.dfm"/>
     <LIBFILES value=""/>
-    <LIBRARIES value="vacommb6.lib rtl.lib vcl.lib"/>
-    <SPARELIBS value="vcl.lib rtl.lib vacommb6.lib"/>
+    <LIBRARIES value="dbrtl.lib adortl.lib vacommb6.lib rtl.lib vcl.lib"/>
+    <SPARELIBS value="vcl.lib rtl.lib vacommb6.lib adortl.lib dbrtl.lib"/>
     <PACKAGES value="vcl.bpi rtl.bpi dbrtl.bpi adortl.bpi vcldb.bpi vclx.bpi bdertl.bpi 
       vcldbx.bpi ibxpress.bpi dsnap.bpi cds.bpi bdecds.bpi qrpt60.bpi teeui.bpi 
       teedb.bpi tee.bpi dss.bpi teeqr.bpi visualclx.bpi visualdbclx.bpi 
@@ -58,7 +58,6 @@
       <FILE FILENAME="SCM_AH221Agent.res" FORMNAME="" UNITNAME="SCM_AH221Agent.res" CONTAINERID="ResTool" DESIGNCLASS="" LOCALCOMMAND=""/>
       <FILE FILENAME="SCM_AH221Agent.cpp" FORMNAME="" UNITNAME="SCM_AH221Agent" CONTAINERID="CCompiler" DESIGNCLASS="" LOCALCOMMAND=""/>
       <FILE FILENAME="SvcController.cpp" FORMNAME="SCM_AH221Agent" UNITNAME="SvcController" CONTAINERID="CCompiler" DESIGNCLASS="TService" LOCALCOMMAND=""/>
-      <FILE FILENAME="AdsComm.cpp" FORMNAME="" UNITNAME="AdsComm" CONTAINERID="CCompiler" DESIGNCLASS="" LOCALCOMMAND=""/>
   </FILELIST>
   <BUILDTOOLS>
   </BUILDTOOLS>
