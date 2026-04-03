@@ -434,15 +434,15 @@ bool __fastcall TSCM_AH221Agent::PollItemsDataHistory()
 {
     try
     {
-        String sql;
-        if (m_sLastHistoryDate.IsEmpty())
-            sql = "SELECT TOP 5 Date, ItemID, Value "
-                  "FROM ItemsDataHistory ORDER BY Date DESC";
-        else
-            sql = "SELECT TOP 20 Date, ItemID, Value "
-                  "FROM ItemsDataHistory "
-                  "WHERE Date > '" + m_sLastHistoryDate + "' "
-                  "ORDER BY Date DESC";
+		String sql;
+		if (m_sLastHistoryDate.IsEmpty())
+		    sql = "SELECT TOP 5 Date, NodeID, Value "
+		          "FROM ItemsDataHistory ORDER BY Date DESC";
+		else
+		    sql = "SELECT TOP 20 Date, NodeID, Value "
+		          "FROM ItemsDataHistory "
+		          "WHERE Date > '" + m_sLastHistoryDate + "' "
+		          "ORDER BY Date DESC";
 
         if (!ExecuteQuery(sql)) return false;
         if (m_pADOQuery->RecordCount == 0) return true;  // no new events
@@ -455,8 +455,8 @@ bool __fastcall TSCM_AH221Agent::PollItemsDataHistory()
 
             try
             {
-                if (m_Items[i].VarName == "ItemID")
-                    m_Items[i].lValue = m_pADOQuery->FieldByName("ItemID")->AsInteger;
+				if (m_Items[i].VarName == "NodeID")      // ±âÁ¸: "ItemID"
+				    m_Items[i].lValue = m_pADOQuery->FieldByName("NodeID")->AsInteger;
                 else if (m_Items[i].VarName == "Value")
                     m_Items[i].lValue = StrToIntDef(m_pADOQuery->FieldByName("Value")->AsString, 0);
                 m_Items[i].Quality = 0xC0;
@@ -478,9 +478,9 @@ bool __fastcall TSCM_AH221Agent::PollProductionBatch()
 {
     try
     {
-        String sql =
-            "SELECT TOP 1 BatchCode, PanelCode, Phase1, Phase2, Quantity "
-            "FROM CustomTable3_Production ORDER BY BatchCode DESC";
+		String sql = "SELECT TOP 1 BatchCode, PanelCode, QuantityPhase1, "
+					 "QuantityPhase2, Quantity "
+					 "FROM CustomTable3_Production ORDER BY BatchCode DESC";
 
         if (!ExecuteQuery(sql) || m_pADOQuery->RecordCount == 0) return false;
 
@@ -881,9 +881,9 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
         m_ItemCount++;
 
         // --- ItemsDataHistory items (ID 30-31) ---
-        m_Items[m_ItemCount].ItemID = 30; m_Items[m_ItemCount].VarName = "ItemID";
+        m_Items[m_ItemCount].ItemID = 30; m_Items[m_ItemCount].VarName = "NodeID";
         m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "ItemsDataHistory";
-        m_Items[m_ItemCount].Description = "Latest alarm ItemID";
+        m_Items[m_ItemCount].Description = "Latest event NodeID";
         m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
         m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
         m_ItemCount++;
