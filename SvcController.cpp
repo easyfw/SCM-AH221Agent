@@ -303,6 +303,7 @@ void __fastcall TSCM_AH221Agent::DisconnectSQL()
     m_bSqlConnected = false;
 }
 
+/*
 bool __fastcall TSCM_AH221Agent::ExecuteQuery(String sql)
 {
     try
@@ -322,6 +323,32 @@ bool __fastcall TSCM_AH221Agent::ExecuteQuery(String sql)
         return false;
     }
 }
+*/
+
+bool __fastcall TSCM_AH221Agent::ExecuteQuery(String sql)
+{
+    try
+    {
+        if (!m_bSqlConnected) return false;
+        m_pADOQuery->Close();
+        m_pADOQuery->SQL->Clear();
+        m_pADOQuery->SQL->Add(sql);
+        m_pADOQuery->Open();
+        return true;
+    }
+    catch (Exception &e)
+    {
+        LogMessage("SQL QRY: " + e.Message);
+
+        // 연결 자체가 끊긴 경우만 재연결 플래그 설정
+        // 컬럼명 오류 등 쿼리 레벨 에러는 연결을 유지
+        if (!m_pADOConn->Connected)
+        {
+            m_bSqlConnected = false;
+        }
+        return false;
+    }
+}
 
 //---------------------------------------------------------------------------
 // Per-group SQL poll functions
@@ -332,10 +359,10 @@ bool __fastcall TSCM_AH221Agent::PollDailyReport()
 {
     try
     {
-        String sql =
-            "SELECT TOP 1 DayDate, MacOn, MacInStart, MacInAlarm, "
-            "TrackInRun, MacInManual "
-            "FROM CustomTable6_DailyReport ORDER BY DayDate DESC";
+		String sql =
+    		"SELECT TOP 1 DayDate, MacOn, MacInStart, MacInAlarm, "
+    		"TrackInRun, MacStartAndFull "    // MacInManual -> MacStartAndFull
+    		"FROM CustomTable6_DailyReport ORDER BY DayDate DESC";
 
         if (!ExecuteQuery(sql) || m_pADOQuery->RecordCount == 0) return false;
 
@@ -814,9 +841,12 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
         m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
         m_ItemCount++;
 
-        m_Items[m_ItemCount].ItemID = 5;  m_Items[m_ItemCount].VarName = "MacInManual";
+//        m_Items[m_ItemCount].ItemID = 5;  m_Items[m_ItemCount].VarName = "MacInManual";
+		m_Items[m_ItemCount].ItemID = 5;  m_Items[m_ItemCount].VarName = "MacStartAndFull";
         m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable6_DailyReport";
-        m_Items[m_ItemCount].Description = "Machine In Manual (sec)";
+//        m_Items[m_ItemCount].Description = "Machine In Manual (sec)";
+		m_Items[m_ItemCount].Description = "Machine Start And Full (sec)";
+ 
         m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
         m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
         m_ItemCount++;
