@@ -12,6 +12,14 @@
 //   - Changed: LoadItemConfig() removed (items registered in code)
 //   - Changed: Timer1Timer() SQL poll + change detect + send
 //
+// [v2 - STRING packet support]
+//   - Added:   ProgramCode(ID14), EdgeCodeLH(ID15), EdgeCodeRH(ID16)
+//   - Added:   BuildStringPacket() - type marker 0xFE, variable-length strings
+//   - Changed: SendToESP32() - sends regular packet then string packet
+//   - Changed: IsValueChanged() - STRING comparison via sStrValue
+//   - Changed: PollProductionReport() - sStrPrevValue tracking
+//   - Note:    ESP32 firmware must check data[3]==0xFE for string packet
+//
 // [Kept identical to ADS/GA3 version]
 //   - TVaComm serial (Mycomm), InitSerialPort, CloseSerialPort
 //   - Packet format [STX][LEN][CNT][ID][Q][VAL]...[CHK][ETX]
@@ -408,6 +416,7 @@ bool __fastcall TSCM_AH221Agent::PollProductionReport()
         {
             if (m_Items[i].TableName != "CustomTable5_ProductionReport") continue;
             m_Items[i].lPrevValue = m_Items[i].lValue;
+            m_Items[i].sStrPrevValue = m_Items[i].sStrValue;
 
             try
             {
@@ -590,11 +599,15 @@ BYTE __fastcall TSCM_AH221Agent::CalcChecksum(BYTE* data, int len)
 }
 
 //---------------------------------------------------------------------------
-// IsValueChanged (same as ADS version)
+// IsValueChanged (same as ADS version + STRING support)
 //---------------------------------------------------------------------------
 bool __fastcall TSCM_AH221Agent::IsValueChanged(int index)
 {
     if (index < 0 || index >= m_ItemCount) return false;
+
+    if (m_Items[index].DataType == "STRING")
+        return (m_Items[index].sStrValue != m_Items[index].sStrPrevValue);
+
     return (m_Items[index].lValue != m_Items[index].lPrevValue);
 }
 
@@ -641,7 +654,70 @@ int __fastcall TSCM_AH221Agent::BuildPacket(BYTE* buffer)
 }
 
 //---------------------------------------------------------------------------
-// SendToESP32 (identical to ADS/GA3 version - TVaComm)
+// BuildStringPacket - STRING items only
+//   [STX(0x02)][LEN_L][LEN_H][0xFE][CNT]
+//   [ID_L][ID_H][Q][SLEN][char0][char1]...[charN]
+//   ...(repeat per STRING item)
+//   [CHK][ETX(0x03)]
+//
+//   0xFE = type marker to distinguish from regular packet
+//          (regular packet has itemCount 1~50 at this position)
+//   SLEN = string length in bytes (max 63)
+//---------------------------------------------------------------------------
+int __fastcall TSCM_AH221Agent::BuildStringPacket(BYTE* buffer)
+{
+    // Count STRING items
+    int strCount = 0;
+    for (int i = 0; i < m_ItemCount; i++)
+    {
+        if (m_Items[i].DataType == "STRING") strCount++;
+    }
+    if (strCount == 0) return 0;
+
+    int pos = 0;
+
+    buffer[pos++] = PROTO_STX;  // same STX as regular packet
+
+    int lenPos = pos;
+    pos += 2;  // placeholder for LEN
+
+    buffer[pos++] = 0xFE;  // type marker: string packet
+    buffer[pos++] = (BYTE)strCount;
+
+    for (int i = 0; i < m_ItemCount; i++)
+    {
+        if (m_Items[i].DataType != "STRING") continue;
+
+        WORD itemId = (WORD)m_Items[i].ItemID;
+        buffer[pos++] = (BYTE)(itemId & 0xFF);
+        buffer[pos++] = (BYTE)((itemId >> 8) & 0xFF);
+
+        buffer[pos++] = (BYTE)m_Items[i].Quality;
+
+        // String value (max 63 bytes, truncate if longer)
+        AnsiString strVal = m_Items[i].sStrValue;
+        int sLen = strVal.Length();
+        if (sLen > 63) sLen = 63;
+
+        buffer[pos++] = (BYTE)sLen;
+        for (int j = 0; j < sLen; j++)
+            buffer[pos++] = (BYTE)strVal[j + 1];  // AnsiString is 1-based
+    }
+
+    WORD dataLen = pos - 3;
+    buffer[lenPos] = (BYTE)(dataLen & 0xFF);
+    buffer[lenPos + 1] = (BYTE)((dataLen >> 8) & 0xFF);
+
+    buffer[pos] = CalcChecksum(&buffer[1], pos - 1);
+    pos++;
+
+    buffer[pos++] = PROTO_ETX;
+
+    return pos;
+}
+
+//---------------------------------------------------------------------------
+// SendToESP32 (modified: sends regular + string packets)
 //---------------------------------------------------------------------------
 void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
 {
@@ -681,9 +757,26 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
         if (WaitForResponse(RESP_TIMEOUT_MS))
         {
             logMsg += " OK";
+
+            // --- Send STRING packet after regular packet ACK ---
+            BYTE strBuffer[512];
+            int strLen = BuildStringPacket(strBuffer);
+            if (strLen > 0)
+            {
+                Sleep(50);  // small gap between packets
+                Mycomm->WriteBuf(strBuffer, strLen);
+                logMsg += " STR:" + IntToStr(strLen);
+
+                if (WaitForResponse(RESP_TIMEOUT_MS))
+                    logMsg += " SOK";
+                else
+                    logMsg += " SFAIL";
+            }
+
             for (int i = 0; i < m_ItemCount; i++)
             {
                 m_Items[i].lPrevValue = m_Items[i].lValue;
+                m_Items[i].sStrPrevValue = m_Items[i].sStrValue;
                 m_Items[i].Changed = false;
             }
             m_nRetryCount = 0;
@@ -877,6 +970,31 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
         m_Items[m_ItemCount].DataType = "FLOAT"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
         m_Items[m_ItemCount].Description = "Thickness (mm*1000)";
         m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        // --- ProductionReport STRING items (ID 14-16) ---
+        m_Items[m_ItemCount].ItemID = 14; m_Items[m_ItemCount].VarName = "ProgramCode";
+        m_Items[m_ItemCount].DataType = "STRING"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Program Code";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].sStrValue = ""; m_Items[m_ItemCount].sStrPrevValue = "";
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 15; m_Items[m_ItemCount].VarName = "EdgeCodeLH";
+        m_Items[m_ItemCount].DataType = "STRING"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Edge Band Code LH";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].sStrValue = ""; m_Items[m_ItemCount].sStrPrevValue = "";
+        m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
+        m_ItemCount++;
+
+        m_Items[m_ItemCount].ItemID = 16; m_Items[m_ItemCount].VarName = "EdgeCodeRH";
+        m_Items[m_ItemCount].DataType = "STRING"; m_Items[m_ItemCount].TableName = "CustomTable5_ProductionReport";
+        m_Items[m_ItemCount].Description = "Edge Band Code RH";
+        m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
+        m_Items[m_ItemCount].sStrValue = ""; m_Items[m_ItemCount].sStrPrevValue = "";
         m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
         m_ItemCount++;
 

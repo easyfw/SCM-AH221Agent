@@ -46,6 +46,7 @@ struct TSqlItemInfo
     long        lValue;         // Current value (as long for packet)
     long        lPrevValue;     // Previous value (for change detection)
     String      sStrValue;      // String value (for STRING type)
+    String      sStrPrevValue;  // Previous string value (for change detection)
     int         Quality;        // 0xC0=Good, 0x00=Bad (OPC DA compatible)
     bool        Changed;        // Changed since last successful send
 };
@@ -150,6 +151,7 @@ private:
     // --- Packet Protocol (same as GA3) ---
     BYTE __fastcall CalcChecksum(BYTE* data, int len);
     int  __fastcall BuildPacket(BYTE* buffer);
+    int  __fastcall BuildStringPacket(BYTE* buffer);
     void __fastcall SendToESP32(int changeCount = 0, bool isHeartbeat = false);
 
     // --- Change Detection ---
