@@ -348,8 +348,8 @@ bool __fastcall TSCM_AH221Agent::ExecuteQuery(String sql)
     {
         LogMessage("SQL QRY: " + e.Message);
 
-        // ¿¬°á ÀÚÃ¼°¡ ²÷±ä °æ¿ì¸¸ Àç¿¬°á ÇÃ·¡±× ¼³Á¤
-        // ÄÃ·³¸í ¿À·ù µî Äõ¸® ·¹º§ ¿¡·¯´Â ¿¬°áÀ» À¯Áö
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Ã¼ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ì¸¸ ï¿½ç¿¬ï¿½ï¿½ ï¿½Ã·ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
+        // ï¿½Ã·ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
         if (!m_pADOConn->Connected)
         {
             m_bSqlConnected = false;
@@ -464,7 +464,7 @@ bool __fastcall TSCM_AH221Agent::PollItemsDataHistory()
 
             try
             {
-				if (m_Items[i].VarName == "NodeID")      // ±âÁ¸: "ItemID"
+				if (m_Items[i].VarName == "NodeID")      // ï¿½ï¿½ï¿½ï¿½: "ItemID"
 				    m_Items[i].lValue = m_pADOQuery->FieldByName("NodeID")->AsInteger;
                 else if (m_Items[i].VarName == "Value")
                     m_Items[i].lValue = StrToIntDef(m_pADOQuery->FieldByName("Value")->AsString, 0);
@@ -763,8 +763,19 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
             int strLen = BuildStringPacket(strBuffer);
             if (strLen > 0)
             {
-                Sleep(50);  // small gap between packets
+//                Sleep(50);  // small gap between packets
+//                Mycomm->WriteBuf(strBuffer, strLen);
+                Sleep(100);  // gap between packets (increased)
+
+                // Purge RX buffer before string packet
+                while (Mycomm->ReadBufUsed() > 0)
+                {
+                    BYTE dummy;
+                    Mycomm->ReadBuf(&dummy, 1);
+                }
+
                 Mycomm->WriteBuf(strBuffer, strLen);
+
                 logMsg += " STR:" + IntToStr(strLen);
 
                 if (WaitForResponse(RESP_TIMEOUT_MS))
