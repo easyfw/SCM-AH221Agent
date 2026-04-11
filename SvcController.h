@@ -121,6 +121,9 @@ private:
     DWORD       m_dwLastSendTick;
     DWORD       m_dwHeartbeatInterval;
 
+    // No-change counter (log suppression)
+    int         m_nNoChangeCount;
+
     // === Log ===
     TCHAR       gbuf[65535];
 
@@ -129,6 +132,7 @@ private:
 
     // --- Logging (same as GA3) ---
     void __fastcall LogMessage(String msg);
+    void __fastcall WriteStatusFile(String msg);
 
     // --- Settings ---
     void __fastcall LoadSettings();
