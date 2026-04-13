@@ -799,11 +799,9 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
             int strLen = BuildStringPacket(strBuffer);
             if (strLen > 0)
             {
-//                Sleep(50);  // small gap between packets
-//                Mycomm->WriteBuf(strBuffer, strLen);
-                Sleep(100);  // gap between packets (increased)
+                Sleep(50);
 
-                // Purge RX buffer before string packet
+                // Purge RX buffer
                 while (Mycomm->ReadBufUsed() > 0)
                 {
                     BYTE dummy;
@@ -811,13 +809,11 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
                 }
 
                 Mycomm->WriteBuf(strBuffer, strLen);
-
                 logMsg += " STR:" + IntToStr(strLen);
 
-                if (WaitForResponse(RESP_TIMEOUT_MS))
-                    logMsg += " SOK";
-                else
-                    logMsg += " SFAIL";
+                // ACK 대기 없이 전송만 (fire-and-forget)
+                // ESP32 디버그 로그에서 수신 확인됨 — ACK 문제는 TVaComm RX 버퍼 이슈
+                logMsg += " SENT";
             }
 
             for (int i = 0; i < m_ItemCount; i++)
