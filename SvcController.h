@@ -49,6 +49,7 @@ struct TSqlItemInfo
     String      sStrPrevValue;  // Previous string value (for change detection)
     int         Quality;        // 0xC0=Good, 0x00=Bad (OPC DA compatible)
     bool        Changed;        // Changed since last successful send
+    bool        bLogExempt;     // true=로그 트리거 제외(시간누적 카운터). 전송은 정상.
 };
 
 //---------------------------------------------------------------------------
@@ -156,7 +157,7 @@ private:
     BYTE __fastcall CalcChecksum(BYTE* data, int len);
     int  __fastcall BuildPacket(BYTE* buffer);
     int  __fastcall BuildStringPacket(BYTE* buffer);
-    void __fastcall SendToESP32(int changeCount = 0, bool isHeartbeat = false);
+    void __fastcall SendToESP32(int changeCount = 0, int meaningfulCount = 0, bool isHeartbeat = false);
 
     // --- Change Detection ---
     bool __fastcall IsValueChanged(int index);

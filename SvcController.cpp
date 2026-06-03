@@ -755,7 +755,7 @@ int __fastcall TSCM_AH221Agent::BuildStringPacket(BYTE* buffer)
 //---------------------------------------------------------------------------
 // SendToESP32 (modified: sends regular + string packets)
 //---------------------------------------------------------------------------
-void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
+void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, int meaningfulCount, bool isHeartbeat)
 {
     if (!m_bCommOpened || Mycomm == NULL || !Mycomm->Active())
     {
@@ -829,9 +829,12 @@ void __fastcall TSCM_AH221Agent::SendToESP32(int changeCount, bool isHeartbeat)
             logMsg += " FAIL";
         }
 
-        // Log to file only when SQL data changed or error occurred.
-        // No-change heartbeats just update the overwrite status file.
-        if (changeCount > 0 || logMsg.Pos("FAIL") > 0)
+        // [수정 2026-06-03] logsave.txt 는 '의미있는' 항목이 바뀔 때만 기록.
+        //   MacOn 등 시간누적(초) 카운터는 머신이 켜져만 있어도 매초 증가해
+        //   매 사이클 변화로 잡혔고, 그래서 logsave.txt 가 끝없이 커졌다.
+        //   meaningfulCount = 시간누적 항목(bLogExempt) 제외한 변화 수.
+        //   (MacOn 값 자체는 패킷으로 정상 전송됨 - 로그만 안 남길 뿐)
+        if (meaningfulCount > 0 || logMsg.Pos("FAIL") > 0)
         {
             m_nNoChangeCount = 0;
             LogMessage(logMsg);
@@ -1092,6 +1095,20 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
 
         LogMessage("Items: " + IntToStr(m_ItemCount));
 
+        // [수정 2026-06-03] 시간누적(초 단위) 카운터를 로그 트리거에서 제외.
+        //   머신이 켜져만 있어도 매초 증가 -> 매 사이클 '변화'로 잡혀 logsave.txt 폭증.
+        //   전송(ESP32)은 그대로 유지하고, logsave.txt 기록은 의미있는 항목
+        //   (생산수/치수/코드/알람) 변화 시에만 한다.
+        for (int i = 0; i < m_ItemCount; i++)
+        {
+            m_Items[i].bLogExempt =
+                (m_Items[i].VarName == "MacOn"           ||
+                 m_Items[i].VarName == "MacInStart"      ||
+                 m_Items[i].VarName == "MacInAlarm"      ||
+                 m_Items[i].VarName == "TrackInRun"      ||
+                 m_Items[i].VarName == "MacStartAndFull");
+        }
+
         // 2. Serial port (TVaComm - same as GA3)
         if (!InitSerialPort(m_nComPort, m_nBaudRate))
         {
@@ -1200,13 +1217,17 @@ void __fastcall TSCM_AH221Agent::Timer1Timer(TObject *Sender)
                 PollProductionBatch();
 
             // 2. Change detection (identical to GA3/ADS)
+            //    changeCount    : 전체 변화 (전송 판단용 - 기존 동작 유지)
+            //    meaningfulCount: 시간누적 카운터(bLogExempt) 제외 (로그 판단용)
             int changeCount = 0;
+            int meaningfulCount = 0;
             for (int i = 0; i < m_ItemCount; i++)
             {
                 if (IsValueChanged(i))
                 {
                     m_Items[i].Changed = true;
                     changeCount++;
+                    if (!m_Items[i].bLogExempt) meaningfulCount++;
                 }
             }
             bool hasChanges = (changeCount > 0);
@@ -1236,7 +1257,7 @@ void __fastcall TSCM_AH221Agent::Timer1Timer(TObject *Sender)
             {
                 bool isHB = heartbeatTimeout && !hasChanges && !m_bFirstSend;
 
-                SendToESP32(changeCount, isHB);
+                SendToESP32(changeCount, meaningfulCount, isHB);
                 m_dwLastSendTick = GetTickCount();
 
                 m_bFirstSend = false;
