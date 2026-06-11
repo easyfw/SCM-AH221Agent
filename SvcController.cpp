@@ -455,6 +455,55 @@ bool __fastcall TSCM_AH221Agent::PollProductionReport()
             m_Items[i].sStrPrevValue = m_Items[i].sStrValue;
 
             try
+			{
+			    String raw = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsString;
+			    raw = raw.Trim();   // 앞뒤 공백 방어
+
+			    if (m_Items[i].DataType == "STRING")
+    			{
+        			m_Items[i].sStrValue = raw;
+        			m_Items[i].Quality = 0xC0;
+    			}
+                else if (m_Items[i].DataType == "FLOAT")
+    			{
+        			// nvarchar "1644" → float 변환 후 ×1000 (기존 스케일 유지)
+			        bool ok = false;
+			        double d = 0.0;
+			        try { d = StrToFloat(raw); ok = true; }
+        			catch (...) { ok = false; }
+
+        			if (ok && !raw.IsEmpty())
+                    {
+            			m_Items[i].lValue = (long)(d * 1000);
+            			m_Items[i].Quality = 0xC0;          // Good
+        			}
+                    else
+                    {
+            			m_Items[i].Quality = 0x00;          // 진짜 변환불가/빈값만 Bad
+        			}
+			    }
+			    else  // INT
+    			{
+        			bool ok = false;
+        			int n = 0;
+        			try { n = StrToInt(raw); ok = true; }
+        			catch (...) { ok = false; }
+
+        			if (ok && !raw.IsEmpty())
+                    {
+            			m_Items[i].lValue = n;
+            			m_Items[i].Quality = 0xC0;
+        			}
+                    else
+                    {
+            			m_Items[i].Quality = 0x00;
+        			}
+    			}
+			}
+			catch (...) { m_Items[i].Quality = 0x00; }
+
+            /*
+            try
             {
                 if (m_Items[i].DataType == "STRING")
                     m_Items[i].sStrValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsString;
@@ -465,6 +514,7 @@ bool __fastcall TSCM_AH221Agent::PollProductionReport()
                 m_Items[i].Quality = 0xC0;
             }
             catch (...) { m_Items[i].Quality = 0x00; }
+            */
         }
         return true;
     }
