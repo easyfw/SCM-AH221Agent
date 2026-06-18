@@ -559,7 +559,13 @@ bool __fastcall TSCM_AH221Agent::PollItemsDataHistory()
             catch (...) { m_Items[i].Quality = 0x00; }
         }
 
-        m_sLastHistoryDate = m_pADOQuery->FieldByName("Date")->AsString;
+        TDateTime dt = m_pADOQuery->FieldByName("Date")->AsDateTime;
+//      m_sLastHistoryDate = FormatDateTime("yyyy-mm-dd'T'hh:nn:ss.zzz", dt);
+		Word wy, wmo, wd, wh, wmi, ws, wms;
+		dt.DecodeDate(&wy, &wmo, &wd);
+		dt.DecodeTime(&wh, &wmi, &ws, &wms);
+		m_sLastHistoryDate.printf("%04d-%02d-%02dT%02d:%02d:%02d.%03d", wy, wmo, wd, wh, wmi, ws, wms);
+
         return true;
     }
     catch (Exception &e)
@@ -582,14 +588,30 @@ bool __fastcall TSCM_AH221Agent::PollProductionBatch()
         for (int i = 0; i < m_ItemCount; i++)
         {
             if (m_Items[i].TableName != "CustomTable3_Production") continue;
-            m_Items[i].lPrevValue = m_Items[i].lValue;
+    		m_Items[i].lPrevValue    = m_Items[i].lValue;
+		    m_Items[i].sStrPrevValue = m_Items[i].sStrValue;
 
-            try
-            {
-                m_Items[i].lValue = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsInteger;
-                m_Items[i].Quality = 0xC0;
-            }
-            catch (...) { m_Items[i].Quality = 0x00; }
+    		try
+		    {
+		        String raw = m_pADOQuery->FieldByName(m_Items[i].VarName)->AsString;
+		        raw = raw.Trim();
+
+		        if (m_Items[i].DataType == "STRING")
+        		{
+		            m_Items[i].sStrValue = raw;        // BatchCode / PanelCode
+		            m_Items[i].Quality = 0xC0;
+		        }
+		        else  // INT (Quantity)
+    		    {
+		            if (!raw.IsEmpty())
+		            {
+		                try { m_Items[i].lValue = StrToInt(raw); m_Items[i].Quality = 0xC0; }
+		                catch (...) { m_Items[i].Quality = 0x00; }
+		            }
+		            else m_Items[i].Quality = 0x00;
+        		}
+    		}
+		    catch (...) { m_Items[i].Quality = 0x00; }
         }
         return true;
     }
@@ -1123,14 +1145,16 @@ void __fastcall TSCM_AH221Agent::ServiceStart(TService *Sender, bool &Started)
 
         // --- ProductionBatch items (ID 20-24) ---
         m_Items[m_ItemCount].ItemID = 20; m_Items[m_ItemCount].VarName = "BatchCode";
-        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].DataType = "STRING"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].sStrValue = ""; m_Items[m_ItemCount].sStrPrevValue = "";   // ← 추가
         m_Items[m_ItemCount].Description = "Batch code";
         m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
         m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
         m_ItemCount++;
 
         m_Items[m_ItemCount].ItemID = 21; m_Items[m_ItemCount].VarName = "PanelCode";
-        m_Items[m_ItemCount].DataType = "INT"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].DataType = "STRING"; m_Items[m_ItemCount].TableName = "CustomTable3_Production";
+        m_Items[m_ItemCount].sStrValue = ""; m_Items[m_ItemCount].sStrPrevValue = "";   // ← 추가
         m_Items[m_ItemCount].Description = "Panel code";
         m_Items[m_ItemCount].lValue = 0; m_Items[m_ItemCount].lPrevValue = 0;
         m_Items[m_ItemCount].Quality = 0x00; m_Items[m_ItemCount].Changed = false;
